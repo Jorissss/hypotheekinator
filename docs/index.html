@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Mortgage Simulator — Annuity vs Linear</title>
+    <style>
+      :root{--bg:#ffffff;--muted:#6b7280;--accent:#0066cc}
+      body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;max-width:980px;margin:24px auto;padding:0 16px;background:var(--bg);color:#111}
+      header{display:flex;align-items:center;gap:16px}
+      .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}
+      label{display:block;font-size:0.9rem;color:var(--muted)}
+      input{width:100%;padding:8px;margin-top:6px;border:1px solid #e5e7eb;border-radius:6px}
+      button{padding:8px 12px;margin-top:10px;background:var(--accent);color:white;border:none;border-radius:6px}
+      canvas{max-width:100%}
+      .summary{margin-top:12px;padding:12px;border:1px solid #eee;background:#fafafa;border-radius:6px}
+      footer{margin-top:24px;color:var(--muted);font-size:0.9rem}
+      @media (max-width:700px){.grid{grid-template-columns:1fr}}
+    </style>
+    <!-- React + ReactDOM + Babel for in-browser JSX transpile (ok for small demo) -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script crossorigin src="https://unpkg.com/babel-standalone@6.26.0/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  </head>
+  <body>
+    <header>
+      <h1>Mortgage Simulator — Annuity vs Linear</h1>
+    </header>
+
+    <div id="root"></div>
+
+    <script src="mortgage.js"></script>
+    <script type="text/babel">
+    const {useState, useRef, useEffect} = React;
+
+    function simulate(params){
+      const loan = Number(params.loan);
+      const annual_rate = Number(params.annual_rate);
+      const investment_return = Number(params.investment_return);
+      const inflation = Number(params.inflation);
+      const tax_rate = Number(params.tax_rate);
+      const years = Number(params.years);
+      const woz_value = Number(params.woz_value);
+      const ewf_rate = Number(params.ewf_rate);
+
+      const months = years*12;
+      const r = annual_rate/12;
+      const r_inv = investment_return/12;
+      const r_inf = inflation/12;
+
+      const annuity_payment = loan * (r / (1 - Math.pow(1 + r, -months)));
+      const principal_payment = loan / months;
+
+      let balance_ann = loan;
+      let balance_lin = loan;
+      let ann_investment = 0;
+      let lin_investment = 0;
+      const ann_net = [];
+      const lin_net = [];
+
+      const initial_interest = loan * r;
+      const ewf_monthly_initial = woz_value * ewf_rate / 12;
+      const initial_net_deduction = Math.max(initial_interest - ewf_monthly_initial, 0);
+      const budget = (principal_payment + initial_interest) - initial_net_deduction * tax_rate;
+
+      let inflation_factor = 1;
+
+      for(let m=0;m<months;m++){
+        inflation_factor *= 1 + r_inf;
+        const ewf_monthly = woz_value * ewf_rate / 12;
+
+        // annuity
+        const interest_ann = balance_ann * r;
+        const net_deduction_ann = Math.max(interest_ann - ewf_monthly, 0);
+        const tax_refund_ann = net_deduction_ann * tax_rate;
+        const principal_ann = annuity_payment - interest_ann;
+        balance_ann -= principal_ann;
+        const effective_payment_ann = annuity_payment - tax_refund_ann;
+
+        // linear
+        const interest_lin = balance_lin * r;
+        const net_deduction_lin = Math.max(interest_lin - ewf_monthly, 0);
+        const tax_refund_lin = net_deduction_lin * tax_rate;
+        const payment_lin = principal_payment + interest_lin;
+        balance_lin -= principal_payment;
+        const effective_payment_lin = payment_lin - tax_refund_lin;
+
+        // invest savings vs shared budget
+        ann_investment = ann_investment * (1 + r_inv) + (budget - effective_payment_ann);
+        lin_investment = lin_investment * (1 + r_inv) + (budget - effective_payment_lin);
+
+        const ann_real = (-balance_ann + ann_investment) / inflation_factor;
+        const lin_real = (-balance_lin + lin_investment) / inflation_factor;
+
+        ann_net.push(ann_real);
+        lin_net.push(lin_real);
+      }
+
+      const years_arr = Array.from({length:months}, (_,i)=> (i+1)/12);
+      return {
+        years: years_arr,
+        ann_net,
+        lin_net,
+        final_ann: ann_net[ann_net.length-1],
+        final_lin: lin_net[lin_net.length-1]
+      };
+    }
+
+    // Dutch EUR formatter
+    const eurFmt = new Intl.NumberFormat('nl-NL', { style: 'currency', currency: 'EUR', minimumFractionDigits:2, maximumFractionDigits:2 });
+    function formatEUR(value){
+      // Ensure numeric input
+      const v = Number(value) || 0;
+      // Intl uses non-breaking space for thousands; replace with dot and comma for decimals
+      // But 'nl-NL' already uses '.' as thousands separator and ',' as decimal, and shows the symbol before
+      return eurFmt.format(v).replace('\u00A0', ' ');
+    }
+
+    function App(){
+      const [params, setParams] = useState({
+        loan:520000, annual_rate:0.03.5, investment_return:0.03, inflation:0.02,
+        tax_rate:0.37, years:30, woz_value:500000, ewf_rate:0.0035
+      });
+      const [result, setResult] = useState(null);
+      const chartRef = useRef(null);
+      const chartInstance = useRef(null);
+
+      useEffect(()=>{
+        // initial run
+        const res = window.simulate(params);
+        setResult(res);
+      },[]);
+
+      useEffect(()=>{
+        if(!result) return;
+        const ctx = chartRef.current.getContext('2d');
+        if(chartInstance.current){
+          chartInstance.current.data.labels = result.years;
+          chartInstance.current.data.datasets[0].data = result.ann_net;
+          chartInstance.current.data.datasets[1].data = result.lin_net;
+          chartInstance.current.update();
+          return;
+        }
+        chartInstance.current = new Chart(ctx,{
+          type:'line',
+          data:{
+            labels: result.years,
+            datasets:[
+              {label:'Annuity',data:result.ann_net,borderColor:'#0066cc',tension:0.2,pointRadius:0},
+              {label:'Linear',data:result.lin_net,borderColor:'#cc6600',tension:0.2,pointRadius:0}
+            ]
+          },
+          options:{
+            scales:{
+              x: {
+                title:{display:true,text:'Years'},
+                ticks: {
+                  callback: function(value, index, values){
+                    // value is the label index; labels are fractional years; show label only when integer (whole years)
+                    const label = this.getLabelForValue(value);
+                    if(Number.isInteger(label)) return label;
+                    return '';
+                  }
+                }
+              },
+              y:{title:{display:true,text:"Real Net Worth (EUR, today's money)"}}
+            },
+            plugins:{legend:{display:true}}
+          }
+        });
+      },[result]);
+
+      function updateField(e){
+        const {name,value} = e.target;
+        setParams(p=>({...p,[name]: value}));
+      }
+
+      function runSim(e){
+        e && e.preventDefault();
+        // parse numeric fields
+        const parsed = {...params};
+        ['loan','annual_rate','investment_return','inflation','tax_rate','years','woz_value','ewf_rate']
+          .forEach(k=> parsed[k] = Number(parsed[k]));
+        const res = window.simulate(parsed);
+        setResult(res);
+      }
+
+      return (
+        <div>
+          <form onSubmit={runSim}>
+            <div className="grid">
+              <div>
+                <label>Loan amount (€)</label>
+                <input name="loan" value={params.loan} onChange={updateField} />
+              </div>
+              <div>
+                <label>Years</label>
+                <input name="years" value={params.years} onChange={updateField} />
+              </div>
+              <div>
+                <label>Annual mortgage rate (e.g. 0.04)</label>
+                <input name="annual_rate" value={params.annual_rate} onChange={updateField} />
+              </div>
+              <div>
+                <label>Investment return (annual)</label>
+                <input name="investment_return" value={params.investment_return} onChange={updateField} />
+              </div>
+              <div>
+                <label>Inflation (annual)</label>
+                <input name="inflation" value={params.inflation} onChange={updateField} />
+              </div>
+              <div>
+                <label>Tax rate (deduction, e.g. 0.37)</label>
+                <input name="tax_rate" value={params.tax_rate} onChange={updateField} />
+              </div>
+              <div>
+                <label>WOZ value (€)</label>
+                <input name="woz_value" value={params.woz_value} onChange={updateField} />
+              </div>
+              <div>
+                <label>Eigenwoningforfait rate (e.g. 0.0035)</label>
+                <input name="ewf_rate" value={params.ewf_rate} onChange={updateField} />
+              </div>
+            </div>
+            <div>
+              <button type="submit">Run simulation</button>
+            </div>
+          </form>
+
+          <div className="summary">
+            {result ? (
+              <div>
+                <strong>Final real net worth (Annuity):</strong> {formatEUR(result.final_ann)}<br/>
+                <strong>Final real net worth (Linear):</strong> {formatEUR(result.final_lin)}<br/>
+                <strong>Difference (ann - lin):</strong> {formatEUR(result.final_ann - result.final_lin)}
+              </div>
+            ) : 'No result yet'}
+          </div>
+
+          <div style={{marginTop:16}}>
+            <canvas ref={chartRef} height={300}></canvas>
+          </div>
+
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    </script>
+  </body>
+</html>
